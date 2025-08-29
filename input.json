@@ -1,0 +1,6 @@
+{
+  "job_name": "relancejob",
+  "build_number": 32,
+  "jenkins_url": "http://localhost:8080",
+  "build_status": "FAILURE"
+}
