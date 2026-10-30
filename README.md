@@ -64,7 +64,7 @@ The Jenkins agent is the flagship of a lightweight framework (the `ai_agents` pa
 | Feature | Details |
 |---|---|
 | **LLM root-cause analysis** | Failure logs (head and tail kept when long) are sent with a structured prompt; the model returns JSON with `cause`, `category` (`network`, `dependency`, `syntax`, `configuration`, `resource`, `permission`, `unknown`), `confidence` and `suggested_actions`. |
-| **Automatic retry decisions** | Rule-based decision layer on top of the LLM analysis: high-confidence network/resource failures or retry keywords lead to a retrigger via the Jenkins API; code and config errors lead to a high-urgency notification; low-confidence analyses are flagged for investigation. |
+| **Automatic retry decisions** | Rule-based decision layer on top of the LLM analysis: high-confidence network/resource failures or retry keywords lead to a retrigger via the Jenkins API; code and config errors lead to a high-urgency notification; low-confidence analyses are flagged for investigation. Retries are capped per job (2 consecutive by default) across the builds the agent retriggers, and the budget resets when the job goes green. |
 | **Jenkinsfile review on success** | Green builds are not ignored: the pipeline definition is reviewed for best practices, performance, security and maintainability. |
 | **Log sanitization** | Regex-based masking of passwords, API keys, Jenkins tokens, AWS keys, private keys, JWTs, DB URLs, IPs, emails, phone numbers and more. Optional deeper PII detection with Microsoft Presidio. |
 | **Three ways to trigger** | Jenkins webhook endpoint, background polling of all jobs, or CLI with a JSON input file. |
@@ -133,7 +133,7 @@ flowchart LR
 
 ### Agent workflow (LangGraph)
 
-The graph is built by `WorkflowAgent._build_workflow_graph()` from [`src/ai_agents/agents/jenkins_agent/config.yaml`](src/ai_agents/agents/jenkins_agent/config.yaml). All edges are static except the conditional edge out of `analyze_status`, which routes on the `next_node` value set by its handler.
+The graph is built by `WorkflowAgent._build_workflow_graph()` from [`src/ai_agents/agents/jenkins_agent/config.yaml`](src/ai_agents/agents/jenkins_agent/config.yaml). `analyze_status` has a conditional edge that routes on the `next_node` value set by its handler. Every other edge follows the YAML, except that any handler can set `next_node: handle_error` (the workflow's `error_node`) to jump straight to `handle_error` instead of running the next node. Those error edges are left out of the diagram to keep it readable.
 
 ```mermaid
 flowchart TD
@@ -166,10 +166,10 @@ flowchart TD
 |---|---|
 | `receive_webhook` | Accepts the payload from `webhook_data`, `input`, or the raw state (CLI). |
 | `extract_job_data` | Resolves job, build number and credentials, then fetches console log, `Jenkinsfile` (inline pipeline script or GitHub raw file for SCM pipelines), build metadata and node info. Sanitizes the logs and retries once if they are empty. |
-| `analyze_status` | Routes to the success, failure or other-status branch. |
+| `analyze_status` | Routes to the success, failure or other-status branch; a `SUCCESS` resets the job's retry counter. |
 | `handle_failure` | Sends sanitized logs to the LLM with [`handle_failure.tpl`](src/ai_agents/agents/jenkins_agent/prompts/handle_failure.tpl) and parses the JSON analysis. |
-| `make_decision` | Chooses `retry`, `notify` or `investigate` from category, confidence and retry keywords; at most 2 retries per run. |
-| `execute_action` | Retriggers the job through the Jenkins API when the decision is `retry`. |
+| `make_decision` | Chooses `retry`, `notify` or `investigate` from category, confidence and retry keywords. A job gets at most `JENKINS_MAX_RETRIES` (default 2) consecutive automatic retries; the count is persisted between runs and reset when the job succeeds. |
+| `execute_action` | Retriggers the job through the Jenkins API when the decision is `retry` and records the retry in the per-job counter. |
 | `handle_success` | Sends the `Jenkinsfile` to the LLM with [`handle_success.tpl`](src/ai_agents/agents/jenkins_agent/prompts/handle_success.tpl) and stores improvement suggestions. |
 | `suggest_improvements` | Passes the improvements on to formatting. |
 | `handle_other_status` | Builds a simple status notification. |
@@ -219,14 +219,15 @@ sequenceDiagram
 
 | Layer | Technology |
 |---|---|
-| Language | Python 3.9+ (Docker image uses 3.11) |
+| Language | Python 3.9+ (CI and the Docker image use 3.11) |
 | Agent orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph`, YAML-defined workflows |
-| LLM access | OpenAI Python SDK against an OpenAI-compatible endpoint (OpenRouter by default); LangChain `ChatOpenAI` for framework-level models |
+| LLM access | OpenAI Python SDK against an OpenAI-compatible endpoint (OpenRouter by default), model set in the agent's `config.yaml`; LangChain `ChatOpenAI` for framework-level models |
 | Jenkins integration | `python-jenkins` and the Jenkins REST API via `requests` |
 | API server | FastAPI, Uvicorn, Pydantic Settings |
 | Notifications | SMTP (`smtplib`), Slack Incoming Webhooks |
 | Memory backends (optional) | Redis, local vector store |
-| Tooling | Poetry, Graphviz (workflow rendering), pre-commit, flake8, black, pytest |
+| Tooling | Poetry, Graphviz (workflow rendering), pytest, ruff, pre-commit, flake8, black |
+| CI | GitHub Actions (ruff + pytest); a GitLab pre-commit pipeline is also kept |
 | Deployment | Dockerfile |
 
 ---
@@ -235,9 +236,9 @@ sequenceDiagram
 
 ### Prerequisites
 
-- **Python 3.9+** and **[Poetry](https://python-poetry.org/)**
+- **Python 3.9+** (CI runs 3.11) and **[Poetry](https://python-poetry.org/) 2.x** (the lock file needs Poetry 2)
 - A **Jenkins** instance reachable from where the agent runs, plus a user with an **API token** (Jenkins: *your user* > *Configure* > *API Token*). The user needs read access to jobs and, for automatic retries, permission to build.
-- An **LLM API key** for an OpenAI-compatible provider. The handlers call `openai/gpt-3.5-turbo` through **OpenRouter** by default.
+- An **LLM API key** for an OpenAI-compatible provider. The handlers call `openai/gpt-3.5-turbo` through **OpenRouter** by default; change `model.model_id` (and `model.config.openai_api_base`) in [`jenkins_agent/config.yaml`](src/ai_agents/agents/jenkins_agent/config.yaml) to use another model or provider.
 - *(Optional)* SMTP credentials (for example a Gmail app password) and/or a Slack Incoming Webhook URL.
 - *(Optional)* Graphviz system binaries, to render workflow diagrams.
 
@@ -247,9 +248,11 @@ sequenceDiagram
 git clone https://github.com/yessineabdelmaksoud/jenkins-agent.git
 cd jenkins-agent
 
-pip install poetry
-poetry install          # use `poetry install --no-root` if installing the root package fails
+pipx install poetry     # or: pip install "poetry>=2.1,<3"
+poetry install          # runtime + dev dependencies, and the ai_agents package from src/
 ```
+
+`pyodbc` is not used by the shipped agents and is optional: `poetry install -E odbc` installs it (it needs the system ODBC libraries, e.g. `unixodbc-dev`).
 
 ### Configuration
 
@@ -261,15 +264,17 @@ cp .env.example .env
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OPENAI_API_KEY` | Yes | | LLM API key. The CLI refuses to start without it; the handlers use it first. |
-| `OPENROUTER_API_KEY` | No | | Used by the handlers when `OPENAI_API_KEY` is not set. |
+| `OPENAI_API_KEY` | Yes* | | LLM API key (*set this or `OPENROUTER_API_KEY`; the CLI refuses to start without one). Used first by the handlers. |
+| `OPENROUTER_API_KEY` | Yes* | | Used by the handlers when `OPENAI_API_KEY` is not set. |
 | `OPENAI_API_BASE` | No | | Overrides the LLM base URL. |
-| `OPENROUTER_BASE_URL` | No | `https://openrouter.ai/api/v1` | LLM base URL when `OPENAI_API_BASE` is not set. |
+| `OPENROUTER_BASE_URL` | No | | LLM base URL when `OPENAI_API_BASE` is not set. Otherwise `model.config.openai_api_base` from `config.yaml` is used (`https://openrouter.ai/api/v1`). |
 | `JENKINS_URL` | Yes | | Base URL of your Jenkins server. |
 | `JENKINS_USER` | Yes* | | Jenkins username (*required unless anonymous read is enabled). |
 | `JENKINS_TOKEN` | Yes* | | Jenkins API token. |
 | `JENKINS_SANITIZE_LOGS` | No | `true` | Mask sensitive data in logs before analysis. |
 | `JENKINS_ENABLE_ADVANCED_PII` | No | `false` | Enable Presidio PII detection (requires `presidio-analyzer`, not installed by default). |
+| `JENKINS_MAX_RETRIES` | No | `2` | Consecutive automatic retries allowed per job before the agent only notifies. |
+| `JENKINS_AGENT_STATE_DIR` | No | `.jenkins_agent` | Directory of `retry_counts.json`, the per-job retry counters (relative to the working directory). |
 | `JENKINS_POLLING_ENABLED` | No | `true` | Start the polling service with the API server. |
 | `JENKINS_POLLING_INTERVAL` | No | `5` | Seconds between polling cycles. |
 | `EMAIL_SENDER` | No | | SMTP username / sender address. Email is skipped if unset. |
@@ -319,26 +324,38 @@ Pick one:
 
 ### Docker
 
-The Dockerfile expects the repository root as build context and copies your `.env` into the image:
+The Dockerfile lives next to the API code but needs the **repository root** as build context. It installs the runtime dependencies only (`poetry install --only main --no-root`) and never copies `.env` into the image (see [`.dockerignore`](.dockerignore)); pass your settings at run time:
 
 ```bash
 docker build -f src/ai_agents/deployment/api_agent/Dockerfile -t jenkins-agent .
-docker run -p 8000:8000 jenkins-agent
+docker run --env-file .env -p 8000:8000 \
+  -v jenkins-agent-state:/app/.jenkins_agent \
+  jenkins-agent
 ```
 
-> **Note:** the image bakes `.env` in, so do not push it to a public registry. The Dockerfile uses `poetry install --no-dev`, which recent Poetry releases no longer accept; you may need `--only main --no-root` instead.
+The volume keeps the per-job retry counters across container restarts; it can be left out.
 
 ### Tests and quality checks
 
-```bash
-# API unit tests (agent service mocked)
-pytest src/ai_agents/deployment/api_agent/tests/test_api.py
+The same commands run in [GitHub Actions](.github/workflows/ci.yml) on every push and pull request to `main`:
 
+```bash
+# Real-error lint: syntax errors, undefined names (rules in pyproject.toml)
+poetry run ruff check .
+
+# Unit tests: workflow routing, retry cap, model config, CLI and API.
+# Jenkins, the LLM client and notifications are faked: no keys or network needed.
+poetry run pytest
+```
+
+Manual checks that are not part of CI:
+
+```bash
 # Check that settings load correctly
-python src/ai_agents/deployment/api_agent/test_config.py
+poetry run python src/ai_agents/deployment/api_agent/test_config.py
 
 # End-to-end smoke test: needs a reachable Jenkins and an LLM key
-python test_jenkins_agent.py
+poetry run python test_jenkins_agent.py
 
 # Lint and formatting hooks (also run on GitLab merge requests via .gitlab-ci.yml)
 pre-commit run --all-files
@@ -439,16 +456,18 @@ The minimal server in `jenkins_agent/server.py` exposes only `POST /webhook`.
 jenkins-agent/
 ├── run_cli.py                      # CLI launcher (no PYTHONPATH needed)
 ├── input.json                      # Sample CLI input
-├── test_jenkins_agent.py           # End-to-end smoke test
+├── test_jenkins_agent.py           # End-to-end smoke test (manual, needs Jenkins)
 ├── pyproject.toml / poetry.lock
 ├── .env.example
+├── .github/workflows/ci.yml        # GitHub Actions: ruff + pytest
+├── tests/                          # Offline unit tests (pytest)
 ├── docs/                           # Jenkins agent guide, deployment guide, screenshots
 └── src/ai_agents/
     ├── agents/
     │   ├── agent_base.py           # Abstract agent interface
     │   ├── workflow_agent.py       # YAML -> LangGraph StateGraph builder
     │   ├── registry.py             # Agent name -> class registry
-    │   ├── jenkins_agent/          # config.yaml, handlers.py, prompts/, server.py
+    │   ├── jenkins_agent/          # config.yaml, handlers.py, retry_store.py, prompts/, server.py
     │   ├── calculator/             # Offline example agent
     │   └── sales_assistant/        # Example LLM agent
     ├── tools/
@@ -496,7 +515,7 @@ Every agent follows the same pattern as `jenkins_agent` and `calculator`:
 
 Tools are added by subclassing `BaseTool` (`name`, `description`, `run`) and registering the class in `src/ai_agents/tools/__init__.py`; handlers then fetch them with `ToolRegistry.get_tool("<name>")`.
 
-> Conditional edges are currently wired in `WorkflowAgent._build_workflow_graph()` with a fixed set of Jenkins targets. A new agent that needs branching should extend that mapping.
+> Branching: mark a node with `transitions: {conditional: true}` and have its handler set `next_node` to the name of any node in the workflow (unknown names fall back to `end_process`, or the end of the graph). Errors: add a node named in `workflow.error_node` (default `handle_error`); any handler that sets `next_node` to it is routed there instead of following its static edge.
 
 ---
 
@@ -504,20 +523,17 @@ Tools are added by subclassing `BaseTool` (`name`, `description`, `run`) and reg
 
 **Current limitations**
 
-- **Model is hardcoded.** The Jenkins handlers call `openai/gpt-3.5-turbo` (OpenRouter naming) via the OpenAI SDK; they do not use the `model:` block from `config.yaml`. Pointing `OPENAI_API_BASE` at api.openai.com requires changing the model id.
-- **Retry cap is per run.** `retry_count` lives in the graph state, so the 2-retry limit does not carry over to the new build that a retry triggers.
-- **Error routing.** Only `analyze_status` has a conditional edge; when another node sets `next_node = "handle_error"`, the static edge still runs the next node.
+- **Retry counters are local.** They live in a JSON file on the machine running the agent: fine for one API process, but several workers or hosts would each keep their own count. The budget is per job name and only resets on a `SUCCESS` build.
+- **Model id must match the provider.** The default `openai/gpt-3.5-turbo` uses OpenRouter naming; pointing `OPENAI_API_BASE` at api.openai.com also requires changing `model.model_id` in `config.yaml`.
 - **In-memory run history.** API run records and polling state are lost on restart and are not shared between workers.
 - **Jenkinsfile fetch** for SCM pipelines only supports public GitHub repositories (raw URL); other providers fall back to an empty `Jenkinsfile`.
 - **No authentication** on the API or webhook endpoint, and CORS allows all origins by default. Put it behind a reverse proxy or private network.
 
 **Roadmap ideas**
 
-- Make the LLM provider and model configurable per agent.
-- Persist run history and retry counters (Redis is already a dependency).
+- Persist run history, and move the retry counters to a shared store (Redis is already a dependency).
 - Webhook signature verification and API authentication.
-- Generic, config-driven conditional edges for all agents.
-- Broader test coverage for the agent handlers.
+- Broader test coverage for the Jenkins tool, log sanitizer and notifiers.
 
 ---
 
