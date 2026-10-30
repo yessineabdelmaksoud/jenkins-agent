@@ -21,6 +21,9 @@ state_schema:
   error: string
 workflow:
   entrypoint: receive_webhook
+  # Any handler that sets next_node to this node is routed here instead of
+  # following its static edge.
+  error_node: handle_error
   nodes:
     - name: receive_webhook
       type: function

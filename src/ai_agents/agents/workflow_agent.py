@@ -1,7 +1,7 @@
 """Implementation of workflow-based agents."""
 
 from typing import Any, Dict, Optional, TypedDict
-from langgraph.graph import StateGraph
+from langgraph.graph import END, StateGraph
 from ai_agents.utils.config_loader import load_yaml_config
 from .agent_base import AgentBase
 
@@ -204,28 +204,53 @@ class WorkflowAgent(AgentBase):
             )
 
         g.set_entry_point(cfg["workflow"]["entrypoint"])
-        
-        # Add edges (static and conditional)
-        for edge in cfg["workflow"]["edges"]:
-            g.add_edge(edge["from"], edge["to"])
-        
-        # Add conditional edges for nodes marked with conditional transitions
+
+        node_names = {node["name"] for node in cfg["workflow"]["nodes"]}
+        # Handlers signal failures by setting next_node to the error node.
+        # Only honoured when that node exists in the workflow.
+        error_node = cfg["workflow"].get("error_node", "handle_error")
+        if error_node not in node_names:
+            error_node = None
+        default_node = "end_process" if "end_process" in node_names else END
+
+        # Add static edges, grouped by source node
+        targets_by_source: Dict[str, list] = {}
+        for edge in cfg["workflow"].get("edges", []):
+            targets_by_source.setdefault(edge["from"], []).append(edge["to"])
+
+        for source, targets in targets_by_source.items():
+            if error_node and len(targets) == 1 and source != error_node:
+                # Single successor: still divert to the error node when the
+                # handler asked for it, instead of running the next node.
+                target = targets[0]
+                g.add_conditional_edges(
+                    source,
+                    lambda state, target=target: (
+                        error_node
+                        if state.get("next_node") == error_node
+                        else target
+                    ),
+                    {target: target, error_node: error_node},
+                )
+            else:
+                for target in targets:
+                    g.add_edge(source, target)
+
+        # Add conditional edges for nodes marked with conditional transitions:
+        # route to the node named in next_node, or to end_process/END otherwise.
         for node in cfg["workflow"]["nodes"]:
             transitions = node.get("transitions", {})
             if transitions.get("conditional"):
-                node_name = node["name"]
-                # Add conditional edge that uses the next_node field
+                path_map = {name: name for name in node_names}
+                path_map[default_node] = default_node
                 g.add_conditional_edges(
-                    node_name,
-                    lambda state: state.get("next_node", "end_process"),
-                    # Define the possible target nodes
-                    {
-                        "handle_failure": "handle_failure",
-                        "handle_success": "handle_success",
-                        "handle_other_status": "handle_other_status",
-                        "end_process": "end_process",
-                        "handle_error": "handle_error"
-                    }
+                    node["name"],
+                    lambda state: (
+                        state.get("next_node")
+                        if state.get("next_node") in node_names
+                        else default_node
+                    ),
+                    path_map,
                 )
 
         return g.compile()
