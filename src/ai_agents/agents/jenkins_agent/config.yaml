@@ -19,6 +19,17 @@ state_schema:
   metadata: object
   next_node: string
   error: string
+  # Keys below are written by the handlers; LangGraph drops any key that is
+  # not declared here, so they must be listed to reach later nodes.
+  llm_recommendation: string
+  decision_info: object
+  retry_count: integer
+  trigger_result: any
+  investigation_priority: string
+  notification_config: object
+  notification_sent: boolean
+  notification_results: object
+  status: string
 workflow:
   entrypoint: receive_webhook
   # Any handler that sets next_node to this node is routed here instead of

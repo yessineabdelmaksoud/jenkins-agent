@@ -158,5 +158,6 @@ def test_jenkins_agent_stops_at_handle_error_when_extraction_fails(monkeypatch):
     result = agent.run({"job_name": "demo", "build_number": 7})
 
     assert result["error"] == "Missing jenkins_url or job_name"
+    assert result["status"] == "error"
     assert "notification_content" not in result
     assert called == []
