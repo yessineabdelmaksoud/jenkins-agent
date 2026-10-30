@@ -1,0 +1,32 @@
+# Secrets: pass them at run time (docker run --env-file .env), never bake them in
+.env
+.env.*
+!.env.example
+
+# VCS, caches and local environments
+.git
+.gitignore
+.gitlab-ci.yml
+.github
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+.venv
+venv
+env
+
+# Local runtime state and generated files
+.jenkins_agent
+vector_store
+logs
+*.log
+workflow_graph.png
+
+# Not needed in the image
+docs
+tests
+test_jenkins_agent.py
