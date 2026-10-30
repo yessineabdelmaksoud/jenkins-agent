@@ -1,8 +1,7 @@
 [tool.poetry]
 name = 'ai-agents'
 version = '0.1.0'
-
-
+packages = [{ include = "ai_agents", from = "src" }]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.9.7 || >3.9.7"
@@ -17,7 +16,7 @@ python-dotenv = ">=1.0.0,<2.0.0"
 typing-extensions = ">=4.8.0,<5.0.0"
 pydantic-settings = "^2.0.0"
 openpyxl = "*"
-pyodbc = "*"
+pyodbc = { version = "*", optional = true }
 langgraph = "*"
 redis = "*"
 graphviz = "*"
@@ -27,6 +26,11 @@ fastapi = ">=0.104.0,<1.0.0"
 uvicorn = {extras = ["standard"], version = ">=0.24.0,<1.0.0"}
 python-jenkins = ">=1.8.0,<2.0.0"
 pyyaml = ">=6.0,<7.0.0"
+
+[tool.poetry.extras]
+# Not used by the shipped agents; install with `poetry install -E odbc` for SQL Server/ODBC work.
+# Needs the system ODBC libraries (e.g. unixodbc-dev on Debian/Ubuntu).
+odbc = ["pyodbc"]
 
 [tool.poetry.group.dev.dependencies]
 python = ">=3.9,<3.9.7 || >3.9.7"
@@ -60,7 +64,7 @@ tests = ["tests", "*/tests"]
 
 [tool.coverage.run]
 branch = true
-source = ["autogeny", "tests"]
+source = ["ai_agents"]
 
 [tool.coverage.report]
 show_missing = true
@@ -83,4 +87,11 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
-lint.select = ["D205"]
+src = ["src"]
+
+[tool.ruff.lint]
+# Real errors only: syntax errors, invalid comparisons, misplaced statements, undefined names.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src/ai_agents/deployment/api_agent/tests"]
