@@ -10,8 +10,29 @@ import json
 from openai import OpenAI
 from ...tools import ToolRegistry
 from ...workflows.utils.prompts_utils import load_prompt_template, render_prompt
+from .retry_store import RetryStore
 
 
+DEFAULT_MAX_RETRIES = 2
+
+
+def _max_retries() -> int:
+    """Maximum consecutive automatic retries per job (JENKINS_MAX_RETRIES, default 2)."""
+    try:
+        return max(0, int(os.getenv('JENKINS_MAX_RETRIES', DEFAULT_MAX_RETRIES)))
+    except ValueError:
+        return DEFAULT_MAX_RETRIES
+
+
+def _stored_retry_count(job: Optional[str]) -> int:
+    """Consecutive automatic retries already made for this job (persisted across runs)."""
+    if not job:
+        return 0
+    try:
+        return RetryStore().get(job)
+    except Exception as e:
+        print(f"[JenkinsAgent] retry store read failed: {e}")
+        return 0
 
 
 def decide_action_fallback(failure_analysis: Dict[str, Any], build_number: int) -> Dict[str, Any]:
@@ -257,6 +278,13 @@ def analyze_status(state: Dict[str, Any], model=None, tools=None, memory=None, n
     status = (state.get("build_status") or "UNKNOWN").upper()
     print(f"[JenkinsAgent] analyze_status - build_status={status}")
     if status == "SUCCESS":
+        # A green build ends the failure streak: allow automatic retries again.
+        job = state.get("job_name")
+        if job:
+            try:
+                RetryStore().reset(job)
+            except Exception as e:
+                print(f"[JenkinsAgent] analyze_status - retry store reset failed: {e}")
         print("[JenkinsAgent] analyze_status - routing to handle_success")
         return {**state, "next_node": "handle_success"}
     elif status == "FAILURE":
@@ -442,8 +470,11 @@ def make_decision(state: Dict[str, Any], model=None, tools=None, memory=None, no
         failure_analysis = state.get('failure_analysis', {})
         job = state.get('job_name')
         build = state.get('build_number')
-        retry_count = state.get('retry_count', 0)  # Track retry attempts
-                
+        # Retries already made for this job since its last success. The graph
+        # state starts at 0 for every retriggered build, so read the persisted count.
+        retry_count = max(state.get('retry_count') or 0, _stored_retry_count(job))
+        max_retries = _max_retries()
+
         # Check for retry indicators in cause and suggested actions
         should_retry = False
         cause = failure_analysis.get('cause', '').lower()
@@ -472,7 +503,7 @@ def make_decision(state: Dict[str, Any], model=None, tools=None, memory=None, no
         reasoning = decision_result.get('reasoning', 'Default reasoning')
         
         # Override decision if retry indicators found and retry count is low
-        if should_retry and retry_count < 2:
+        if should_retry and retry_count < max_retries:
             if decision != 'retry':
                 print(f"[JenkinsAgent] make_decision - overriding LLM decision to 'retry' due to retry indicators")
                 decision = 'retry'
@@ -480,10 +511,10 @@ def make_decision(state: Dict[str, Any], model=None, tools=None, memory=None, no
                 decision_result['decision'] = decision
                 decision_result['reasoning'] = reasoning
         # Respect retry limits
-        if decision == 'retry' and retry_count >= 2:
+        if decision == 'retry' and retry_count >= max_retries:
             print(f"[JenkinsAgent] make_decision - retry limit reached, changing to notify")
             decision = 'notify'
-            reasoning = f"Retry limit exceeded ({retry_count}/2). Original reasoning: {reasoning}"
+            reasoning = f"Retry limit exceeded ({retry_count}/{max_retries}). Original reasoning: {reasoning}"
             decision_result['decision'] = decision
             decision_result['reasoning'] = reasoning
         
@@ -524,7 +555,7 @@ def execute_action(state: Dict[str, Any], model=None, tools=None, memory=None, n
         decision_info = state.get('decision_info', {})
         job = state.get('job_name')
         build = state.get('build_number')
-        retry_count = state.get('retry_count', 0)
+        retry_count = max(state.get('retry_count') or 0, _stored_retry_count(job))
 
         # Resolve Jenkins connection info
         jenkins_url = state.get('jenkins_url') or os.getenv('JENKINS_URL')
@@ -538,8 +569,8 @@ def execute_action(state: Dict[str, Any], model=None, tools=None, memory=None, n
                 print('[JenkinsAgent] execute_action - missing jenkins_url or job for retry')
                 return {**state, 'action_taken': 'retry_failed_missing_info', 'next_node': 'format_notification'}
             
-            # Check retry limits
-            max_retries = 2
+            # Check retry limits (counted per job across retriggered builds)
+            max_retries = _max_retries()
             if retry_count >= max_retries:
                 print(f'[JenkinsAgent] execute_action - maximum retry attempts reached ({retry_count}/{max_retries})')
                 return {**state, 'action_taken': 'retry_limit_exceeded', 'next_node': 'format_notification'}
@@ -552,9 +583,15 @@ def execute_action(state: Dict[str, Any], model=None, tools=None, memory=None, n
                 print(f"[JenkinsAgent] execute_action - triggering build for job={job} (attempt #{retry_count + 1})")
                 status = jenkins_tool.trigger_build(job, jenkins_url, username, api_token)
                 print(f"[JenkinsAgent] execute_action - trigger_build returned: {status}")
-                
-                # Update retry count
-                new_retry_count = retry_count + 1
+                if status is False:
+                    return {**state, 'action_taken': 'retry_failed', 'trigger_result': status, 'retry_count': retry_count, 'next_node': 'format_notification'}
+
+                # Persist the retry so the run for the build we just triggered sees it
+                try:
+                    new_retry_count = RetryStore().increment(job)
+                except Exception as e:
+                    print(f"[JenkinsAgent] execute_action - retry store update failed: {e}")
+                    new_retry_count = retry_count + 1
                 
                 return {
                     **state, 
