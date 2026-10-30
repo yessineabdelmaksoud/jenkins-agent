@@ -50,8 +50,8 @@ def main() -> Dict[str, Any]:
 
     # Load environment variables
     env_vars = load_env_vars()
-    if not env_vars.get("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY environment variable is required")
+    if not (env_vars.get("OPENAI_API_KEY") or env_vars.get("OPENROUTER_API_KEY")):
+        print("Error: set OPENAI_API_KEY or OPENROUTER_API_KEY (environment or .env)")
         sys.exit(1)
 
     try:

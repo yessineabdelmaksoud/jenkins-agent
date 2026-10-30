@@ -26,6 +26,10 @@ def offline_env(monkeypatch, tmp_path):
     monkeypatch.delenv("JENKINS_MAX_RETRIES", raising=False)
     # Keep each test's persisted retry counters in its own directory.
     monkeypatch.setenv("JENKINS_AGENT_STATE_DIR", str(tmp_path / "agent_state"))
+    # Never pick up a developer's local .env during tests.
+    from ai_agents.utils import config_loader
+
+    monkeypatch.setattr(config_loader, "load_dotenv", lambda *args, **kwargs: False)
     yield
 
 

@@ -24,5 +24,14 @@ class JenkinsAgent(WorkflowAgent):
     def prompt_dir(self):
         return os.path.join(os.path.dirname(__file__), "prompts")
 
+    def build_model(self):
+        """Return the `model:` block from config.yaml as plain settings.
+
+        The handlers call an OpenAI-compatible endpoint (OpenRouter by default)
+        with the OpenAI SDK and read the model id and base URL from this dict, so
+        no LangChain model (and no API key) is needed to build the agent.
+        """
+        return dict(self.config.get("model") or {})
+
     def build_agent(self):
         return self._build_workflow_graph(self.config, self.handler_module, self.prompt_dir)

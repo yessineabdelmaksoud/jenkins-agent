@@ -30,6 +30,13 @@ state_schema:
   notification_sent: boolean
   notification_results: object
   status: string
+# LLM used by handle_failure and handle_success, through any OpenAI-compatible API.
+# OPENAI_API_BASE / OPENROUTER_BASE_URL override openai_api_base when set.
+model:
+  type: openai
+  model_id: openai/gpt-3.5-turbo
+  config:
+    openai_api_base: https://openrouter.ai/api/v1
 workflow:
   entrypoint: receive_webhook
   # Any handler that sets next_node to this node is routed here instead of

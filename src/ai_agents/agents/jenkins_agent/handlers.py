@@ -14,6 +14,33 @@ from .retry_store import RetryStore
 
 
 DEFAULT_MAX_RETRIES = 2
+DEFAULT_MODEL_ID = 'openai/gpt-3.5-turbo'
+DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1'
+
+
+def _llm_settings(model: Any = None) -> Dict[str, Optional[str]]:
+    """Resolve model id, base URL and API key for the LLM calls.
+
+    `model` is the agent's `model:` block from config.yaml (see JenkinsAgent.build_model).
+    The model id comes from `model_id` (default openai/gpt-3.5-turbo); the base URL from
+    OPENAI_API_BASE, OPENROUTER_BASE_URL, `config.openai_api_base`, then OpenRouter;
+    the key from OPENAI_API_KEY, then OPENROUTER_API_KEY.
+    """
+    model_cfg = model if isinstance(model, dict) else {}
+    extra_cfg = model_cfg.get('config') or {}
+    model_id = (
+        model_cfg.get('model_id')
+        or getattr(model, 'model_name', None)  # a LangChain chat model, if one is passed
+        or DEFAULT_MODEL_ID
+    )
+    base_url = (
+        os.getenv('OPENAI_API_BASE')
+        or os.getenv('OPENROUTER_BASE_URL')
+        or extra_cfg.get('openai_api_base')
+        or DEFAULT_BASE_URL
+    )
+    api_key = os.getenv('OPENAI_API_KEY') or os.getenv('OPENROUTER_API_KEY')
+    return {'model_id': model_id, 'base_url': base_url, 'api_key': api_key}
 
 
 def _max_retries() -> int:
@@ -332,10 +359,11 @@ def handle_failure(state: Dict[str, Any], model=None, tools=None, memory=None, n
         job = state.get('job_name')
         build = state.get('build_number')
 
-        # Prepare API key and base URL
-        api_key = os.getenv('OPENAI_API_KEY') or os.getenv('OPENROUTER_API_KEY')
-        base_url = os.getenv('OPENAI_API_BASE') or os.getenv('OPENROUTER_BASE_URL') or 'https://openrouter.ai/api/v1'
-        
+        # Prepare model, API key and base URL from the agent's model config
+        llm = _llm_settings(model)
+        api_key = llm['api_key']
+        base_url = llm['base_url']
+
         if not api_key:
             print('[JenkinsAgent] handle_failure - No API key found; using fallback analysis')
             failure_analysis = {'cause': 'unknown', 'suggested_actions': [], 'confidence': 0.0, 'category': 'unknown'}
@@ -388,7 +416,7 @@ def handle_failure(state: Dict[str, Any], model=None, tools=None, memory=None, n
         print('[JenkinsAgent] handle_failure - sending structured prompt to LLM')
         completion = client.chat.completions.create(
             extra_body={},
-            model='openai/gpt-3.5-turbo',  # Using less rate-limited model
+            model=llm['model_id'],
             messages=[{'role': 'user', 'content': prompt}],
             temperature=0.2  # Lower temperature for more consistent analysis
         )
@@ -673,9 +701,10 @@ def handle_success(state: Dict[str, Any], model=None, tools=None, memory=None, n
                                 continue
             return None
 
-        api_key = os.getenv('OPENAI_API_KEY') or os.getenv('OPENROUTER_API_KEY')
-        base_url = os.getenv('OPENAI_API_BASE') or os.getenv('OPENROUTER_BASE_URL') or 'https://openrouter.ai/api/v1'
-        
+        llm = _llm_settings(model)
+        api_key = llm['api_key']
+        base_url = llm['base_url']
+
         if api_key and jenkinsfile:
             try:
                 client = OpenAI(base_url=base_url, api_key=api_key)
@@ -709,7 +738,7 @@ def handle_success(state: Dict[str, Any], model=None, tools=None, memory=None, n
                 print('[JenkinsAgent] handle_success - sending Jenkinsfile to LLM')
                 completion = client.chat.completions.create(
                     extra_body={},
-                    model='openai/gpt-3.5-turbo',  # Using less rate-limited model
+                    model=llm['model_id'],
                     messages=[{'role': 'user', 'content': prompt}],
                 )
                 content = ''
@@ -732,7 +761,7 @@ def handle_success(state: Dict[str, Any], model=None, tools=None, memory=None, n
                 success_analysis = {'summary': 'LLM analysis failed', 'improvements': [], 'confidence': 0.0}
         else:
             if not api_key:
-                print('[JenkinsAgent] handle_success - OPENAI_API_KEY not set; skipping LLM analysis')
+                print('[JenkinsAgent] handle_success - OPENAI_API_KEY/OPENROUTER_API_KEY not set; skipping LLM analysis')
             if not jenkinsfile:
                 print('[JenkinsAgent] handle_success - Jenkinsfile missing; skipping LLM analysis')
             success_analysis = {'summary': 'No analysis performed', 'improvements': [], 'confidence': 0.0}

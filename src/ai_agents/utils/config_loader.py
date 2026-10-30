@@ -37,5 +37,5 @@ def load_env_vars() -> Dict[str, str]:
         dict: Environment settings.
     """
     load_dotenv()
-    keys = ["OPENAI_API_KEY", "REDIS_HOST", "REDIS_PORT"]
+    keys = ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "REDIS_HOST", "REDIS_PORT"]
     return {key: os.getenv(key, "") for key in keys}
