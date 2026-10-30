@@ -17,10 +17,11 @@ def query_database(
     """
     print("Querying database...")
     # Use DeepSeek R1 model via OpenRouter
+    import os
     from openai import OpenAI
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key="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",
+        api_key=os.environ["OPENROUTER_API_KEY"],
     )
     customer_query = state.get("customer_query", "What is the meaning of life?")
     completion = client.chat.completions.create(
@@ -56,10 +57,11 @@ def summarize_answer(
         dict: A dictionary indicating the next step in the process.
     """
     print("Summarizing answer...")
+    import os
     from openai import OpenAI
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key="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",
+        api_key=os.environ["OPENROUTER_API_KEY"],
     )
     db_result = state.get("db_result", "No result found.")
     completion = client.chat.completions.create(
