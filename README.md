@@ -2,6 +2,8 @@
 
 **An AI agent that watches your Jenkins builds, explains why they failed, retries the ones that look transient, and reports back by email or Slack.**
 
+[![CI](https://github.com/yessineabdelmaksoud/jenkins-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/yessineabdelmaksoud/jenkins-agent/actions/workflows/ci.yml)
+
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![LangGraph](https://img.shields.io/badge/LangGraph-workflow-1C3C3C?logo=langchain&logoColor=white)
 ![LangChain](https://img.shields.io/badge/LangChain-0.3-1C3C3C?logo=langchain&logoColor=white)
