@@ -1,5 +1,4 @@
-# Créez un fichier .gitignore pour ignorer les fichiers sensibles
-echo "# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -21,7 +20,17 @@ wheels/
 .installed.cfg
 *.egg
 
+# Test, lint and coverage caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # Virtual Environment
+.venv/
 venv/
 env/
 ENV/
@@ -48,7 +57,11 @@ Thumbs.db
 # Jenkins specific
 jenkins_data/
 *.jenkins
+.jenkins_agent/
 
-# AI Models cache
+# Local vector store (sales_assistant memory)
+/vector_store/
+
+# AI Models cache (root only: src/.../api/models/ is source code)
 .cache/
-models/" > .gitignore
+/models/
